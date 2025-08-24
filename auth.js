@@ -1,10 +1,11 @@
 // File: auth.js
 // Tujuan: Menangani semua logika yang berkaitan dengan autentikasi,
 //         termasuk login, logout, lupa password, dan manajemen sesi.
-// Versi: Diperbaiki dengan Ekspor yang Benar
+// Versi: FINAL - Dengan Validasi Sekolah per Situs
 
 import { supabase } from './config.js';
 import { showLoading, showStatusMessage, setupPasswordToggle } from './utils.js';
+import { TARGET_SEKOLAH_ID } from './site.config.js'; // Impor ID sekolah target
 
 /**
  * Memeriksa sesi pengguna saat ini dan mengarahkan mereka ke halaman yang sesuai.
@@ -87,7 +88,7 @@ export function setupAuthListener() {
 }
 
 /**
- * Menangani proses login saat form di halaman login disubmit.
+ * Menangani proses login dengan validasi sekolah.
  */
 async function handleLogin() {
     const usernameEl = document.getElementById('username');
@@ -97,17 +98,49 @@ async function handleLogin() {
     }
     showLoading(true);
 
-    const { data, error } = await supabase.auth.signInWithPassword({
+    // Langkah 1: Coba otentikasi email dan password
+    const { data: sessionData, error: loginError } = await supabase.auth.signInWithPassword({
         email: usernameEl.value,
         password: passwordEl.value,
     });
 
-    showLoading(false);
-    if (error) {
-        return showStatusMessage(`Login Gagal: ${error.message}`, 'error');
+    if (loginError) {
+        showLoading(false);
+        return showStatusMessage(`Login Gagal: ${loginError.message}`, 'error');
     }
 
-    await checkAuthenticationAndSetup();
+    // Langkah 2: Jika otentikasi berhasil, verifikasi profil dan sekolah pengguna
+    if (sessionData.user) {
+        const { data: userProfile, error: profileError } = await supabase
+            .from('pengguna')
+            .select('sekolah_id, role')
+            .eq('id', sessionData.user.id)
+            .single();
+
+        if (profileError || !userProfile) {
+            await supabase.auth.signOut(); // Langsung logout pengguna yang profilnya tidak ada
+            showLoading(false);
+            return showStatusMessage('Login Gagal: Profil pengguna tidak ditemukan.', 'error');
+        }
+
+        const isSuperAdmin = userProfile.role === 'super_admin';
+
+        // Logika Kunci: Izinkan login HANYA JIKA pengguna adalah Super Admin ATAU
+        // ID sekolah di profilnya cocok dengan ID sekolah yang dikonfigurasi untuk situs ini.
+        if (isSuperAdmin || userProfile.sekolah_id === TARGET_SEKOLAH_ID) {
+            // Login valid, lanjutkan ke pengalihan halaman yang benar
+            showLoading(false); // Matikan loading sebelum redirect
+            await checkAuthenticationAndSetup(); 
+        } else {
+            // Jika sekolah tidak cocok, gagalkan login dan logout paksa
+            await supabase.auth.signOut(); 
+            showLoading(false);
+            return showStatusMessage('Login Gagal: Akun Anda tidak terdaftar untuk sekolah ini.', 'error');
+        }
+    } else {
+         showLoading(false);
+         return showStatusMessage('Login Gagal: Sesi tidak valid setelah login.', 'error');
+    }
 }
 
 /**
@@ -155,6 +188,12 @@ async function handleForgotPassword() {
  * Inisialisasi semua fungsi dan event listener yang diperlukan untuk Halaman Login.
  */
 export async function initLoginPage() {
+    // Pastikan TARGET_SEKOLAH_ID terisi. Jika tidak, ini adalah kesalahan konfigurasi.
+    if (!TARGET_SEKOLAH_ID) {
+        document.body.innerHTML = `<div style="padding: 20px; text-align: center; color: red;"><h1>Error Konfigurasi</h1><p>TARGET_SEKOLAH_ID tidak diatur di site.config.js. Aplikasi tidak dapat berjalan.</p></div>`;
+        return;
+    }
+    
     setupPasswordToggle();
     
     if (window.location.hash.includes('type=recovery')) {
